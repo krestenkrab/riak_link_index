@@ -26,9 +26,17 @@
 -define(IDX_PREFIX,"idx@").
 -define(JSPOOL_HOOK, riak_kv_js_hook).
 
+-ifdef(DEBUG).
+-define(debug(A,B),error_logger:info_msg(A,B)).
+-else.
+-define(debug(A,B),ok).
+-endif.
+
+
 precommit(Object) ->
 
-    {ok, StorageMod} = riak:local_client(),
+    ?debug("precommit in ~p", [Object]),
+
     Bucket = riak_object:bucket(Object),
     Key = riak_object:key(Object),
 
@@ -42,24 +50,23 @@ precommit(Object) ->
     %%    <riak/Bucket/Key>; riaktag="Tag"
     %%
 
-    case riak_object:is_updated(Object) of
+    case is_updated(Object) of
         true ->
             OldLinksToMe = get_index_links(riak_object:get_metadatas(Object)),
-            [{MD,_Value}] = index_contents(StorageMod,
-                                           Bucket,
+            [{MD,_Value}] = index_contents(Bucket,
                                            [{ riak_object:get_update_metadata(Object),
                                               riak_object:get_update_value(Object) }]),
             IndexedObject = riak_object:update_metadata(Object, MD);
 
         false ->
+            {ok, StorageMod} = riak:local_client(),
             case StorageMod:get(Bucket, Key) of
                 {ok, OldRO} ->
                     OldLinksToMe = get_index_links(riak_object:get_metadatas(OldRO));
                 _ ->
                     OldLinksToMe = []
             end,
-            MDVs = index_contents(StorageMod,
-                                  Bucket,
+            MDVs = index_contents(Bucket,
                                   riak_object:get_contents(Object)),
             IndexedObject = riak_object:set_contents(Object, MDVs)
     end,
@@ -71,6 +78,8 @@ precommit(Object) ->
 
     %% this only works in recent riak_kv master branch
     put(?MODULE, {LinksToAdd, LinksToRemove}),
+
+    ?debug("precommit out ~p", [IndexedObject]),
 
     IndexedObject.
 
@@ -150,7 +159,7 @@ get_index_links(MDList) ->
 
 get_all_links(Object) when element(1,Object) =:= r_object ->
     get_all_links
-      (case riak_object:is_updated(Object) of
+      (case is_updated(Object) of
            true ->
                [riak_object:get_update_metadata(Object)]
                    ++ riak_object:get_metadatas(Object);
@@ -159,23 +168,23 @@ get_all_links(Object) when element(1,Object) =:= r_object ->
        end);
 
 get_all_links(MetaDatas) when is_list(MetaDatas) ->
-    Links = lists:fold(fun(MetaData, Acc) ->
-                               case dict:find(?MD_LINKS, MetaData) of
-                                   error ->
-                                       Acc;
-                                   {ok, LinksList} ->
-                                       LinksList ++ Acc
-                               end
-                       end,
-                       [],
-                       MetaDatas),
+    Links = lists:foldl(fun(MetaData, Acc) ->
+                                case dict:find(?MD_LINKS, MetaData) of
+                                    error ->
+                                        Acc;
+                                    {ok, LinksList} ->
+                                        LinksList ++ Acc
+                                end
+                        end,
+                        [],
+                        MetaDatas),
 
     ordsets:from_list(Links).
 
-index_contents(StorageMod, Bucket, Contents) ->
+index_contents(Bucket, Contents) ->
 
     %% grab indexes from bucket properties
-    {ok, IndexHooks} = get_index_hooks(StorageMod, Bucket),
+    {ok, IndexHooks} = get_index_hooks(Bucket),
 
     lists:map
       (fun({MD,Value}) ->
@@ -210,18 +219,14 @@ remove_idx_links(MD) ->
 compute_indexed_md(MD, Value, IndexHooks) ->
     lists:foldl
       (fun({struct, PropList}=IndexHook, MDAcc) ->
-               {<<"tag">>, Tag} = proplists:lookup(PropList, <<"tag">>),
+               {<<"tag">>, Tag} = proplists:lookup(<<"tag">>, PropList),
                Links = case dict:find(?MD_LINKS, MDAcc) of
                            error -> [];
                            {ok, MDLinks} -> MDLinks
                        end,
                IdxTag = <<?IDX_PREFIX,Tag/binary>>,
                KeepLinks =
-                   lists:filter(fun({{_,_}, TagValue}) when TagValue =:= IdxTag ->
-                                        false;
-                                   (_) ->
-                                        true
-                                end,
+                   lists:filter(fun({{_,_}, TagValue}) -> TagValue =/= IdxTag end,
                                 Links),
                NewLinksSansTag =
                    try apply_index_hook(IndexHook, MD, Value) of
@@ -242,9 +247,9 @@ compute_indexed_md(MD, Value, IndexHooks) ->
 
                ResultLinks =
                    lists:map(fun({Bucket,Key})  when is_binary(Bucket), is_binary(Key) ->
-                                     {{Bucket, Key}, Tag};
+                                     {{Bucket, Key}, IdxTag};
                                 ([Bucket, Key]) when is_binary(Bucket), is_binary(Key) ->
-                                     {{Bucket, Key}, Tag}
+                                     {{Bucket, Key}, IdxTag}
                              end,
                              NewLinksSansTag)
                    ++
@@ -259,7 +264,7 @@ compute_indexed_md(MD, Value, IndexHooks) ->
 %%%%%% code from riak_kv_put_fsm %%%%%%
 
 
-get_index_hooks(_StorageMod, Bucket) ->
+get_index_hooks(Bucket) ->
 
     {ok,Ring} = riak_core_ring_manager:get_my_ring(),
     BucketProps = riak_core_bucket:get_bucket(Bucket, Ring),
@@ -267,16 +272,16 @@ get_index_hooks(_StorageMod, Bucket) ->
     IndexHooks = proplists:get_value(link_index, BucketProps, []),
     case IndexHooks of
         <<"none">> ->
-            [];
+            {ok, []};
         {struct, Hook} ->
-            [{struct, Hook}];
+            {ok, [{struct, Hook}]};
         IndexHooks when is_list(IndexHooks) ->
-            IndexHooks
+            {ok, IndexHooks};
+        V ->
+            error_logger:error_msg("bad value in bucket_prop ~p:link_index: ~p", [Bucket,V]),
+            {ok, []}
     end.
 
-
--spec apply_index_hook(_,MD::dict(),Value::term()) ->
-    [{{binary(),binary()},binary()}].
 
 apply_index_hook({struct, Hook}, MD, Value) ->
     Mod = proplists:get_value(<<"mod">>, Hook),
@@ -343,4 +348,16 @@ jsonify_metadata_list(List) ->
                              || {Key, Value} <- List]};
         string -> list_to_binary(List);
         array -> List
+    end.
+
+is_updated(O) ->
+    M = riak_object:get_update_metadata(O),
+    V = riak_object:get_update_value(O),
+    case dict:find(clean, M) of
+        error -> true;
+        {ok,_} ->
+            case V of
+                undefined -> false;
+                _ -> true
+            end
     end.
