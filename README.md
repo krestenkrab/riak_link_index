@@ -15,14 +15,15 @@ employment relation by including this link in the Kresten object:
 
     Link: </riak/company/Trifork>; riaktag="idx@employs"
 
-The magic is that `riak_link_index` will then automatically add a link
-in the opposite direction; from `Trifork` to `Kresten`, and that link
-will have tag `employs`.  The tag needs to bve start with `idx@` for
-`riak_link_index` to recognize it.
+The magic is that `riak_link_index` will then automatically add (and
+maintain) a link in the opposite direction; from `Trifork` to
+`Kresten`, and that link will have tag `employs`.  The tag needs to
+start with `idx@` for `riak_link_index` to recognize it.
 
-Whenever you update a person object, you can pass in new (or multiple)
-such links, and the old reverse links will automatically be
-deleted/updated as appropriate.
+Whenever you update or delete a person object, you can pass in new (or
+multiple) such links, and the old reverse links will automatically be
+deleted/updated as appropriate.  Deleting a company object has no
+effect the other way around.
 
 > The objects that contain the reverse links (in this case
 e.g. `/riak/company/Trifork`) will have empty contents.  So you cannot
@@ -170,24 +171,19 @@ you.  Happy you!
       http://127.0.0.1:8091/riak/person
 
 
-Maintenance
-===========
+Consistency
+-----------
 
-The indexer will also handle delete/update of your records as
-appropriate, and should work fine with `allow_mult` buckets too.
+The indexer will handle delete/update of your records as appropriate,
+and should work fine with `allow_mult` buckets too.  In fact, it is
+recommended to enable a `allow_mult=true` on the buckets containing
+the link objects (company in my example above), otherwise conflicting
+additions may be lot.
 
-In case of a net-split, the current implementation may loose deletes;
-i.e. your index may have some stale links.  That'll be fixed one day,
-but involves stoing a replica of the links in the body of the indexes
-encoded as a vector map.
+There are situations, in which concurrency conflicts resulting in a
+reverse link being deleted are not effectuated.  We're working to
+alleviate that, by mirroring the link-information into vmaps stored in
+the reverse index object.  More later.
 
-Status
-======
-
-The code is at present completely untested, and does not work yet on
-0.14 (release) branch, only on the `master`, because it needs to
-communicate stuff from the precommit hook to the postcommit hook, and
-right now it just passes that in the pdict, but as I said, that only
-wortks on the current develepoment master.
 
 
