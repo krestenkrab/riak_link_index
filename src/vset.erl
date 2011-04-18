@@ -22,7 +22,11 @@
 %%  reordering (in physical time) of add and remove operation, while
 %%  leaving only the vclock-time scale observable, and specifically
 %%  it allows merging of concurrent updates in an orderly fashion.
-%%@end
+%%
+%%  Essentially, a vset is a [vector
+%%  map](http://www.javalimit.com/2011/02/the-beauty-of-vector-clocked-data.html)
+%%  which uses the "contained values" as keys, and true and/or false
+%%  ad the value.  @end
 
 -module(vset).
 -author("Kresten Krab Thorup <krab@trifork.com>").
@@ -100,31 +104,6 @@ remove(Value,ClientID,VSet) ->
 
 
 -ifdef(TEST).
-
-simple_test() ->
-    VC1 = [{jens,{1,1}}],
-    VC2 = [{jens,{2,1}}],
-
-    S1 = vset:new(),
-    S2 = vset:add(foo, VC1, S1),
-    [foo] = values(S2),
-
-    S3 = vset:remove(foo, VC2, S2),
-    [] = values(S3)
-    .
-
-simple2_test() ->
-    VC1 = [{jens,{1,1}}],
-    VC2 = [{jens,{2,1}}],
-
-    S1 = vset:new(),
-
-    S2 = vset:remove(foo, VC2, S1),
-    [] = values(S2),
-
-    S3 = vset:add(foo, VC1, S2),
-    [] = values(S3)
-    .
 
 
 
