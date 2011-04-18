@@ -21,6 +21,8 @@
 
 -export([precommit/1,postcommit/1]).
 
+-define(ERLANG_BINARY,"application/x-erlang-binary").
+-define(MD_CTYPE,<<"content-type">>).
 -define(MD_LINKS,<<"Links">>).
 -define(MD_DELETED,<<"X-Riak-Deleted">>).
 -define(IDX_PREFIX,"idx@").
@@ -71,82 +73,118 @@ precommit(Object) ->
             IndexedObject = riak_object:set_contents(Object, MDVs)
     end,
 
-    %% compute links to add/remove in postcommit
-    NewLinksToMe  = get_index_links(IndexedObject),
-    LinksToRemove = ordsets:subtract(OldLinksToMe, NewLinksToMe),
-    LinksToAdd    = ordsets:subtract(NewLinksToMe, OldLinksToMe),
-
     %% this only works in recent riak_kv master branch
-    put(?MODULE, {LinksToAdd, LinksToRemove}),
+    put(?MODULE, {old_links, OldLinksToMe}),
 
     ?debug("precommit out ~p", [IndexedObject]),
 
     IndexedObject.
 
 postcommit(Object) ->
+    try
 
     case erlang:erase(?MODULE) of
-        {[], []} ->
-            ok;
-        {LinksToAdd, LinksToRemove} ->
+        {old_links, OldLinksToMe} ->
+            %% compute links to add/remove in postcommit
+            NewLinksToMe  = get_index_links(Object),
+            LinksToRemove = ordsets:subtract(OldLinksToMe, NewLinksToMe),
+            LinksToAdd    = ordsets:subtract(NewLinksToMe, OldLinksToMe),
+
+            ?debug("postcommit: old=~p, new=~p", [OldLinksToMe,NewLinksToMe]),
+
             {ok, StorageMod} = riak:local_client(),
             Bucket = riak_object:bucket(Object),
             Key = riak_object:key(Object),
-            add_links(StorageMod, LinksToAdd, Bucket, Key),
-            remove_links(StorageMod, LinksToRemove, Bucket, Key),
+            ClientID = StorageMod:get_client_id(),
+            add_links(StorageMod, LinksToAdd, Bucket, Key, ClientID),
+            remove_links(StorageMod, LinksToRemove, Bucket, Key, ClientID),
             ok;
         _ ->
             error_logger:error_msg("error in pre/postcommit interaction", []),
             ok
-    end.
+    end
 
-add_links(StorageMod, Links, Bucket, Key) ->
+    catch
+       Class:Reason ->
+            error_logger:error_msg("error in postcommit ~p:~p", [Class,Reason]),
+            ok
+    end
+.
+
+add_links(StorageMod, Links, Bucket, Key, ClientID) ->
     lists:foreach(fun({{IndexB,IndexK}, <<?IDX_PREFIX,Tag/binary>>}) ->
-                          add_link(StorageMod, IndexB, IndexK, {{Bucket,Key},Tag})
+                          add_link(StorageMod, IndexB, IndexK, {{Bucket,Key},Tag}, ClientID)
                   end,
                   Links).
 
-add_link(StorageMod, Bucket, Key, Link) ->
-    update(
-      fun(Object) ->
-              Links = get_all_links(Object),
-              IO1 = riak_object:update_value(Object, <<>>),
-              riak_object:update_metadata
-                (IO1, dict:store(?MD_LINKS,
-                                 [Link] ++ Links,
-                                 riak_object:get_update_metadata(IO1)))
+
+add_link(StorageMod, Bucket, Key, Link, ClientID) ->
+    update_links(
+      fun(VLinkSet) ->
+              ?debug("adding link ~p/~p -> ~p", [Bucket, Key, Link]),
+              vset:add(Link, ClientID, VLinkSet)
       end,
       StorageMod, Bucket, Key).
 
-remove_links(StorageMod, Links, Bucket, Key) ->
+remove_links(StorageMod, Links, Bucket, Key, ClientID) ->
     lists:foreach(fun({{IndexB,IndexK}, <<?IDX_PREFIX,Tag/binary>>}) ->
-                          remove_link(StorageMod, IndexB, IndexK, {{Bucket,Key},Tag})
+                          remove_link(StorageMod, IndexB, IndexK, {{Bucket,Key},Tag}, ClientID)
                   end,
                   Links).
 
-remove_link(StorageMod, Bucket, Key, Link) ->
-    update(
-      fun(Object) ->
-              Links = get_all_links(Object),
-              UpdLinks = ordsets:del_element(Link,Links),
-              IO1 = riak_object:update_value(Object, <<>>),
-              riak_object:update_metadata
-                (IO1, dict:store(?MD_LINKS,
-                                 UpdLinks,
-                                 riak_object:get_update_metadata(IO1)))
+remove_link(StorageMod, Bucket, Key, Link, ClientID) ->
+    update_links(
+      fun(VLinkSet) ->
+              ?debug("removing link ~p/~p -> ~p", [Bucket, Key, Link]),
+              vset:remove(Link, ClientID, VLinkSet)
       end,
       StorageMod, Bucket, Key).
 
-update(Fun,StorageMod,Bucket,Key) ->
-    Updated =
-        case StorageMod:get(Bucket,Key) of
-            {ok, Object} ->
-                Fun(Object);
-            _ ->
-                Fun(riak_object:new(Bucket, Key, <<>>))
-        end,
+update_links(Fun,StorageMod,Bucket,Key) ->
+    case StorageMod:get(Bucket,Key) of
+        {ok, Object} ->
+            ?debug("1", []),
+            VLinkSet = decode_merge_vsets(Object),
+            ?debug("decoded: ~p", [VLinkSet]),
+            VLinkSet2 = Fun(VLinkSet),
+            ?debug("transformed: ~p", [VLinkSet2]),
+            Links = vset:values(VLinkSet2),
+            ?debug("new links: ~p", [Links]),
+            IO1 = riak_object:update_value(Object, term_to_binary(VLinkSet2, [compressed])),
+            Updated = riak_object:update_metadata(IO1,
+                          dict:store(?MD_CTYPE, ?ERLANG_BINARY,
+                          dict:store(?MD_LINKS, Links,
+                                     riak_object:get_update_metadata(IO1))));
+        _Got ->
+            ?debug("2: ~p from get(~p,~p)", [_Got, Bucket, Key]),
+            VLinkSet2 = Fun(vset:new()),
+            ?debug("new set: ~p", [VLinkSet2]),
+            case catch (vset:values(VLinkSet2)) of
+                Links -> ok
+            end,
+            ?debug("new links: ~p", [Links]),
+            Updated = riak_object:new(Bucket,Key,
+                                      term_to_binary(VLinkSet2, [compressed]),
+                                      dict:from_list([{?MD_CTYPE, ?ERLANG_BINARY},
+                                                      {?MD_LINKS, Links}]))
+    end,
 
-    StorageMod:put(Updated, 0).
+    ?debug("storing ~p", [Updated]),
+    ok = StorageMod:put(Updated, 1).
+
+
+decode_merge_vsets(Object) ->
+    lists:foldl(fun ({MD,V},Dict) ->
+                        case dict:fetch(?MD_CTYPE, MD) of
+                            ?ERLANG_BINARY ->
+                                Dict2 = binary_to_term(V),
+                                vset:merge(Dict,Dict2);
+                            _ ->
+                                Dict
+                        end
+                end,
+                dict:new(),
+                riak_object:get_contents(Object)).
 
 
 get_index_links(MDList) ->
@@ -185,6 +223,8 @@ index_contents(Bucket, Contents) ->
 
     %% grab indexes from bucket properties
     {ok, IndexHooks} = get_index_hooks(Bucket),
+
+    ?debug("hooks are: ~p", [IndexHooks]),
 
     lists:map
       (fun({MD,Value}) ->

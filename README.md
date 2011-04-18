@@ -26,8 +26,8 @@ deleted/updated as appropriate.  Deleting a company object has no
 effect the other way around.
 
 > The objects that contain the reverse links (in this case
-e.g. `/riak/company/Trifork`) will have empty contents.  So you cannot
-use those bucket/keys for storing data!
+e.g. `/riak/company/Trifork`) will have special content used to manage
+the links, so you cannot use them for other stuff!
 
 This module also allows you to install an `index_hook`, which can be
 used to extract links from your objects.  Index hooks can be written in
@@ -159,7 +159,7 @@ install multiple index functions, but they should all have separate
 tags.  Any `idx@...` tagged links that do not correspond to a
 registered link index are processed as "explicit indexing.  In fact,
 the link_index hook is just a convenient way to have code insert the
-`idx@`-links on your behalf.
+`idx@`-links for you.
 
 Now, we can add objects to the person bucket *without* having to put
 the `idx@employs` link on the object.  The index hook will do it for
@@ -170,6 +170,12 @@ you.  Happy you!
       --data '{ "name": "Justin Sheehy", "employer":"Basho" }' \
       http://127.0.0.1:8091/riak/person
 
+> While you can have multiple `link_index`'es, it is important that
+each `link_index` as its own distinguished tag, because
+`riak_link_index` will process each link index hook by first deleting
+any links with said tag, and then recomputing them based on the new
+content.
+
 
 Consistency
 -----------
@@ -177,13 +183,21 @@ Consistency
 The indexer will handle delete/update of your records as appropriate,
 and should work fine with `allow_mult` buckets too.  In fact, it is
 recommended to enable a `allow_mult=true` on the buckets containing
-the link objects (company in my example above), otherwise conflicting
-additions may be lot.
+the company objects (company in my example above), otherwise
+conflicting updates may be lost.  
 
-There are situations, in which concurrency conflicts resulting in a
-reverse link being deleted are not effectuated.  We're working to
-alleviate that, by mirroring the link-information into vmaps stored in
-the reverse index object.  More later.
+The indexer also manages conflicting updates to the link objects;
+which is pretty cool.  Say, at the same time someone deletes some
+person object, and another process creates a new person object.  In
+that case, the index object (in the company bucket) may end up with a
+conflicting update (i.e. get siblings); which would normally mean that
+someone has to take action on resolving the conflict.  To manage this
+situation, `riak_link_index` stores a [vclock-backed
+set](src/vset.erl) in the content part of the index object (the
+company object), which is a set abstraction, which allows automatic
+merging based on each element in the set having its own vector clock.
+So, if someone adds a link, and someone else deletes a different link,
+then the result is quite easy to handle.
 
 
 
