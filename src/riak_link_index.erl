@@ -21,7 +21,8 @@
 
 -export([precommit/1,postcommit/1]).
 
--define(ERLANG_BINARY,"application/x-erlang-binary").
+-define(CTYPE_ERLANG_BINARY,"application/x-erlang-binary").
+-define(CTYPE_JSON,"application/json").
 -define(MD_CTYPE,<<"content-type">>).
 -define(MD_LINKS,<<"Links">>).
 -define(MD_DELETED,<<"X-Riak-Deleted">>).
@@ -34,6 +35,7 @@
 -define(debug(A,B),ok).
 -endif.
 
+-define(ENCODE_JSON,true).
 
 precommit(Object) ->
 
@@ -106,7 +108,7 @@ postcommit(Object) ->
 
     catch
        Class:Reason ->
-            error_logger:error_msg("error in postcommit ~p:~p", [Class,Reason]),
+            error_logger:error_msg("error in postcommit ~p:~p ~p", [Class,Reason,erlang:get_stacktrace()]),
             ok
     end
 .
@@ -122,7 +124,7 @@ add_link(StorageMod, Bucket, Key, Link, ClientID) ->
     update_links(
       fun(VLinkSet) ->
               ?debug("adding link ~p/~p -> ~p", [Bucket, Key, Link]),
-              vset:add(Link, ClientID, VLinkSet)
+              riak_link_set:add(Link, ClientID, VLinkSet)
       end,
       StorageMod, Bucket, Key).
 
@@ -136,7 +138,7 @@ remove_link(StorageMod, Bucket, Key, Link, ClientID) ->
     update_links(
       fun(VLinkSet) ->
               ?debug("removing link ~p/~p -> ~p", [Bucket, Key, Link]),
-              vset:remove(Link, ClientID, VLinkSet)
+              riak_link_set:remove(Link, ClientID, VLinkSet)
       end,
       StorageMod, Bucket, Key).
 
@@ -148,24 +150,40 @@ update_links(Fun,StorageMod,Bucket,Key) ->
             ?debug("decoded: ~p", [VLinkSet]),
             VLinkSet2 = Fun(VLinkSet),
             ?debug("transformed: ~p", [VLinkSet2]),
-            Links = vset:values(VLinkSet2),
+            Links = riak_link_set:values(VLinkSet2),
             ?debug("new links: ~p", [Links]),
-            IO1 = riak_object:update_value(Object, term_to_binary(VLinkSet2, [compressed])),
+            case ?ENCODE_JSON of
+                true ->
+                    Data = iolist_to_binary(mochijson2:encode(riak_link_set:to_json(VLinkSet2))),
+                    CType = ?CTYPE_JSON;
+                false ->
+                    Data = term_to_binary(VLinkSet2, [compressed]),
+                    CType = ?CTYPE_ERLANG_BINARY
+            end,
+            IO1 = riak_object:update_value(Object, Data),
             Updated = riak_object:update_metadata(IO1,
-                          dict:store(?MD_CTYPE, ?ERLANG_BINARY,
+                          dict:store(?MD_CTYPE, CType,
                           dict:store(?MD_LINKS, Links,
                                      riak_object:get_update_metadata(IO1))));
         _Got ->
             ?debug("2: ~p from get(~p,~p)", [_Got, Bucket, Key]),
-            VLinkSet2 = Fun(vset:new()),
+            VLinkSet2 = Fun(riak_link_set:new()),
             ?debug("new set: ~p", [VLinkSet2]),
-            case catch (vset:values(VLinkSet2)) of
+            case catch (riak_link_set:values(VLinkSet2)) of
                 Links -> ok
             end,
             ?debug("new links: ~p", [Links]),
+            case ?ENCODE_JSON of
+                true ->
+                    Data = iolist_to_binary(mochijson2:encode(riak_link_set:to_json(VLinkSet2))),
+                    CType = ?CTYPE_JSON;
+                false ->
+                    Data = term_to_binary(VLinkSet2, [compressed]),
+                    CType = ?CTYPE_ERLANG_BINARY
+            end,
             Updated = riak_object:new(Bucket,Key,
-                                      term_to_binary(VLinkSet2, [compressed]),
-                                      dict:from_list([{?MD_CTYPE, ?ERLANG_BINARY},
+                                      Data,
+                                      dict:from_list([{?MD_CTYPE, CType},
                                                       {?MD_LINKS, Links}]))
     end,
 
@@ -176,9 +194,12 @@ update_links(Fun,StorageMod,Bucket,Key) ->
 decode_merge_vsets(Object) ->
     lists:foldl(fun ({MD,V},Dict) ->
                         case dict:fetch(?MD_CTYPE, MD) of
-                            ?ERLANG_BINARY ->
+                            ?CTYPE_ERLANG_BINARY ->
                                 Dict2 = binary_to_term(V),
-                                vset:merge(Dict,Dict2);
+                                riak_link_set:merge(Dict,Dict2);
+                            ?CTYPE_JSON ->
+                                Dict2 = riak_link_set:from_json(mochijson2:decode(V)),
+                                riak_link_set:merge(Dict,Dict2);
                             _ ->
                                 Dict
                         end
