@@ -17,7 +17,7 @@
 %% -------------------------------------------------------------------
 
 %%@doc
-%%  A vset is a temportal set abstraction, in which each add/remove
+%%  This is a temportal set abstraction, in which each add/remove
 %%  operation is augmented with a vclock timestamp.  Thus, it allows
 %%  reordering (in physical time) of add and remove operation, while
 %%  leaving only the vclock-time scale observable, and specifically
@@ -28,10 +28,11 @@
 %%  which uses the "contained values" as keys, and true and/or false
 %%  ad the value.  @end
 
--module(vset).
+-module(riak_link_set).
 -author("Kresten Krab Thorup <krab@trifork.com>").
 
 -export([new/0,contains/2,add/3,remove/3,merge/1,merge/2,values/1]).
+-export([to_json/1,from_json/1]).
 
 -ifdef(TEST).
 -include_lib("eunit/include/eunit.hrl").
@@ -101,7 +102,46 @@ remove(Value,ClientID,VSet) ->
     VC2 = vclock:increment(ClientID,VClock),
     dict:store(Value,{VC2,[false]}, VSet).
 
+to_json(VSet) ->
+   {struct, [{<<"links">>,
+              dict:fold(fun(Link,{VClock,Bools}, Acc) ->
+                                [{struct,
+                                  [
+                                   {<<"link">>, link_to_json(Link)},
+                                   {<<"vclock">>, vclock_to_json(VClock)},
+                                   {<<"active">>,Bools}
+                                  ]} |Acc]
+                        end,
+                        [],
+                        VSet)}]}.
 
+from_json({struct, [{<<"links">>, JSONLinks}]}) ->
+    lists:foldl(fun({struct, Members}, Dict) ->
+                        {_, JSONLink} = lists:keyfind(<<"link">>, 1, Members),
+                        {_, JSONVClock} = lists:keyfind(<<"vclock">>, 1, Members),
+                        {_, Bools} = lists:keyfind(<<"active">>, 1, Members),
+                        dict:store(link_from_json(JSONLink),
+                                   {vclock_from_json(JSONVClock), Bools},
+                                   Dict)
+                end,
+                dict:new(),
+                JSONLinks).
+
+link_from_json([Bucket,Key,Tag]) ->
+    {{list_to_binary(mochiweb_util:unquote(Bucket)),
+      list_to_binary(mochiweb_util:unquote(Key))},
+     list_to_binary(mochiweb_util:unquote(Tag))}.
+
+link_to_json({{Bucket,Key},Tag}) ->
+    [list_to_binary(mochiweb_util:quote_plus(Bucket)),
+     list_to_binary(mochiweb_util:quote_plus(Key)),
+     list_to_binary(mochiweb_util:quote_plus(Tag))].
+
+vclock_from_json(Base64Data) ->
+    binary_to_term(zlib:unzip(base64:decode(Base64Data))).
+
+vclock_to_json(Clocks) ->
+    base64:encode(zlib:zip(term_to_binary(Clocks))).
 
 -ifdef(TEST).
 
