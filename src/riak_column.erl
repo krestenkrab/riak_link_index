@@ -142,11 +142,13 @@ update(RowKey, {VC,Values}) when is_list(Values) ->
                     ok = update_main_group(RObj, #main_group{ entries=NewEntries })
             end,
             {ok, Merged};
-        {ok, #main_group{entries=[],grouppointers=Groups}, RObj} ->
+        {ok, #main_group{entries=[],grouppointers=Groups}=TheMainGroup, RObj} ->
             {ok, GroupP} = listfind( bit_prefix_match(RowKey), Groups),
             ?edbg("storing ~p into ~p", [RowKey, group_name(GroupP)]),
             case update_group(GroupP, RowKey, {VC,Values}) of
                 {ok, [], Merged} ->
+                    %% must re-update main group to force later read repair if different
+                    update_main_group(RObj, TheMainGroup),
                     {ok, Merged};
                 {ok, [GP1,GP2]=SplitGroupPs, Merged} when is_bitstring(GP1), is_bitstring(GP2) ->
                     NewMainGroup = #main_group{ grouppointers= lists:sort( SplitGroupPs ++ [R || R <- Groups, R =/= GroupP] ) },
@@ -318,7 +320,7 @@ get_main_group() ->
 merge_main_groups(#main_group{entries=Elms1, grouppointers=Groups1},
                 #main_group{entries=Elms2, grouppointers=Groups2}) ->
     #main_group{ entries=merge_entries(Elms1, Elms2),
-               grouppointers=merge_grouppointers(Groups1, Groups2) }.
+                 grouppointers=merge_grouppointers(Groups1, Groups2) }.
 
 merge_grouppointers(Groups1,Groups2) ->
     R = lists:umerge(Groups1,Groups2),

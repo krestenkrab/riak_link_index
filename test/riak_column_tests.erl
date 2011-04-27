@@ -20,8 +20,8 @@ simple_test() ->
                  Column:add(<<"peter9">>, 9),
                  {ok, {_,[3]}} = Column:lookup(<<"peter3">>),
 
-                 {ok, {VC, [6,5]}} = Column:lookup(<<"peter5">>),
-                 ok = Column:put(<<"peter5">>, {VC, [5]}),
+                 {ok, {VClock, [6,5]}} = Column:lookup(<<"peter5">>),
+                 ok = Column:put(<<"peter5">>, {VClock, [5]}),
                  {ok, {_, [5]}} = Column:lookup(<<"peter5">>),
 
                  Values = Column:fold(fun({_Key,{_VC,[V]}}, Acc) -> [V|Acc] end, []),
