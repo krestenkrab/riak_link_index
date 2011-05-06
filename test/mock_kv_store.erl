@@ -1,6 +1,6 @@
 -module(mock_kv_store, [ClientID, ContentTable, MetaTable, MainBucket, MapRedDelay]).
 
--export([get/2, put/1, put/5, get_bucket/1, set_bucket/2, mapred_bucket_stream/3, get_client_id/0, content_table/0]).
+-export([get/2, put/1, put/2, put/5, get_bucket/1, set_bucket/2, mapred_bucket_stream/3, get_client_id/0, content_table/0]).
 
 -export([init/1, stop/0]).
 
@@ -49,9 +49,12 @@ get(Bucket, Key) ->
     end.
 
 put(Obj) ->
-    put (Obj, 1, 1, 1, []).
+    THIS:put (Obj, [{w,1},{dw,1},{timeout,1}]).
 
-put(Obj,_W,_DW,_TimeOut,Options) ->
+put(Obj,W,DW,TimeOut,Options) ->
+    THIS:put(Obj,[{w,W},{dw,DW},{timeout,TimeOut}|Options]).
+
+put(Obj,Options) ->
     Bucket = riak_object:bucket(Obj),
     Key = riak_object:key(Obj),
 
