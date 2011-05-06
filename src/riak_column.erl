@@ -264,7 +264,7 @@ get_main_group() ->
     case Storage:get(Bucket, ColumnName) of
         {error, notfound} ->
             Storage:put(riak_object:new(Bucket, ColumnName, #main_group{ grouppointers=[<<>>] }),
-                        1, 0, 1000, [{returnbody, true}]),
+                        [{returnbody, true}]),
             get_main_group();
         {error, E} ->
             {error, E};
@@ -279,7 +279,7 @@ get_main_group() ->
                     MergedMainGroup = lists:foldl(fun merge_main_groups/2, #main_group{}, MainGroups),
                     RObj = Storage:put(update_main_group_links(riak_object:update_value(MainGroupObject,
                                                                                         MergedMainGroup)),
-                                       1, 0, 1000, [{returnbody, true}]),
+                                       [{returnbody, true}]),
                     {ok, MergedMainGroup, RObj}
             end
     end.
@@ -292,7 +292,7 @@ merge_grouppointers(Groups1,Groups2) ->
     R = lists:umerge(Groups1,Groups2),
     {Dead,Alive} = compute_dead_or_live(R, {[],[]}),
     if Dead =:= [] -> ok;
-       true -> proc_lib:spawn(fun() -> read_repair_dead_groups(Dead) end)
+       true -> read_repair_dead_groups(Dead) 
     end,
     Alive.
 
@@ -313,7 +313,7 @@ read_repair_dead_groups([GroupP|Rest]) ->
     case get_group(GroupP) of
         {ok, #group{entries=Elms}, RObj} ->
             ok = bulk_update(Elms,binary),
-            ok = Storage:put(riak_object:update_value(RObj,?GROUP_TOMBSTONE), 0);
+            ok = Storage:put(riak_object:update_value(RObj,?GROUP_TOMBSTONE));
         {error, E} ->
             error_logger:info_msg("read repair failed; ignoring error: ~p", [E]),
             ok
@@ -407,7 +407,7 @@ get_group(GroupP) ->
                     %% read repair the group
                     {ok, RObj} =
                         Storage:put(riak_object:update_value(GroupObject, NewGroup),
-                                    1, 0, 10000, [{returnbody, true}]),
+                                    [{returnbody, true}]),
 
                     {ok, NewGroup, RObj}
             end
