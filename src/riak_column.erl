@@ -28,8 +28,7 @@
 
 -export([lookup/1,add/2,put/2,put/3,delete/1,fold/2]).
 
--record(main_group, { entries=[]    :: [entry()],
-                      grouppointers=[] :: [bitstring()] }).
+-record(main_group, { grouppointers=[] :: [bitstring()] }).
 -record(group, {entries=[] :: [entry()] }).
 
 -type vclock() :: vclock:vclock().
@@ -59,46 +58,31 @@ group_name(GroupP) when bit_size(GroupP) =< 160 ->
 
 -spec lookup(RowKey::binary()) -> {ok, value()} | {error, notfound}.
 lookup(RowKey) when is_binary(RowKey) ->
-    case get_main_group() of
-        {ok, #main_group{entries=Elems,grouppointers=GroupPointers}, _} ->
-            case lists:keyfind(RowKey, 1, Elems) of
-                false ->
-                    case listfind( bit_prefix_match(RowKey), GroupPointers ) of
-                        {ok, GroupP} ->
-                            ?edbg("looking up ~p (hash=~w)~nin ~p", [RowKey, crypto:sha(RowKey), group_name(GroupP)]),
-                            case lookup_in_group(GroupP,RowKey) of
-                                {ok,_}=V -> V;
-                                {error,_}=E -> E
-                            end;
-                        notfound ->
-                            {error, notfound}
-                    end;
-                {RowKey,_}=KVE ->
-                    value_result(KVE)
-            end
+    {ok, #main_group{grouppointers=GroupPointers}, _} = get_main_group(),
+    case listfind( bit_prefix_match(RowKey), GroupPointers ) of
+	{ok, GroupP} ->
+	    ?edbg("looking up ~p (hash=~w)~nin ~p", [RowKey, crypto:sha(RowKey), group_name(GroupP)]),
+	    case lookup_in_group(GroupP,RowKey) of
+		{ok,_}=V -> V;
+		{error,_}=E -> E
+	    end;
+	notfound ->
+	    {error, notfound}
     end.
 
 -spec fold(fun(({binary(), {vclock(), list()}}, term()) -> term), term()) -> term().
 fold(Fun,Acc0) ->
-    case get_main_group() of
-        {ok, #main_group{entries=[],grouppointers=GroupPs}, _} ->
-            lists:foldl(fun(GroupP,Acc) ->
-                                case get_group(GroupP) of
-                                    {ok, #group{ entries=Entries }, _} ->
-                                        lists:foldl(Fun, Acc, Entries);
-                                    {error, notfound} ->
-                                        Acc
-                                end
-                        end,
-                        Acc0,
-                        GroupPs);
-        {ok, #main_group{entries=Entries,grouppointers=[]}, _} ->
-            lists:foldl(Fun, Acc0, Entries);
-        {error, notfound} ->
-            Acc0
-    end.
-
-
+    {ok, #main_group{grouppointers=GroupPs}, _} = get_main_group(),
+    lists:foldl(fun(GroupP,Acc) ->
+			case get_group(GroupP) of
+			    {ok, #group{ entries=Entries }, _} ->
+				lists:foldl(Fun, Acc, Entries);
+			    {error, notfound} ->
+				Acc
+			end
+		end,
+		Acc0,
+		GroupPs).
 
 add(RowKey, Value) when is_binary(RowKey) ->
     case lookup(RowKey) of
@@ -120,41 +104,18 @@ put(RowKey, {VC, [Value]}, Options) ->
 
 -spec update(RowKey::binary(), Value::value()) -> {ok, value()}.
 update(RowKey, {VC,Values}) when is_list(Values) ->
-    case get_main_group() of
-        {ok, #main_group{entries=Elems,grouppointers=[]}, RObj} ->
-            case lists:keyfind(RowKey, 1, Elems) of
-                false ->
-                    Merged = {VC,Values},
-                    NewEntries = lists:keysort(1,[ {RowKey, Merged} | Elems ]);
-                {RowKey,ELEM} ->
-                    Merged = merge_values({VC,Values}, ELEM),
-                    NewEntries = lists:keyreplace(RowKey,1,Elems,{RowKey, Merged})
-            end,
-            if
-                length(NewEntries) > ?MAX_ENTRIES_PER_GROUP ->
-                    %% split root
-                    {Group0,Group1} = split_by_prefix(0, NewEntries),
-                    ok = update_group(riak_object:new(Bucket, group_name(<<0:1>>), Group0)),
-                    ok = update_group(riak_object:new(Bucket, group_name(<<1:1>>), Group1)),
-                    ok = update_main_group(RObj, #main_group{ grouppointers=[<<0:1>>, <<1:1>>] });
-                true ->
-                    %% store root
-                    ok = update_main_group(RObj, #main_group{ entries=NewEntries })
-            end,
-            {ok, Merged};
-        {ok, #main_group{entries=[],grouppointers=Groups}=TheMainGroup, RObj} ->
-            {ok, GroupP} = listfind( bit_prefix_match(RowKey), Groups),
-            ?edbg("storing ~p into ~p", [RowKey, group_name(GroupP)]),
-            case update_group(GroupP, RowKey, {VC,Values}) of
-                {ok, [], Merged} ->
-                    %% must re-update main group to force later read repair if different
-                    update_main_group(RObj, TheMainGroup),
-                    {ok, Merged};
-                {ok, [GP1,GP2]=SplitGroupPs, Merged} when is_bitstring(GP1), is_bitstring(GP2) ->
-                    NewMainGroup = #main_group{ grouppointers= lists:sort( SplitGroupPs ++ [R || R <- Groups, R =/= GroupP] ) },
-                    ok = update_main_group(RObj, NewMainGroup),
-                    {ok, Merged}
-            end
+    {ok, #main_group{grouppointers=Groups}=TheMainGroup, RObj} = get_main_group(),
+    {ok, GroupP} = listfind( bit_prefix_match(RowKey), Groups),
+    ?edbg("storing ~p into ~p", [RowKey, group_name(GroupP)]),
+    case update_group(GroupP, RowKey, {VC,Values}) of
+	{ok, [], Merged} ->
+	    %% must re-update main group to force later read repair if different
+	    update_main_group(RObj, TheMainGroup),
+	    {ok, Merged};
+	{ok, [GP1,GP2]=SplitGroupPs, Merged} when is_bitstring(GP1), is_bitstring(GP2) ->
+	    NewMainGroup = #main_group{ grouppointers= lists:sort( SplitGroupPs ++ [R || R <- Groups, R =/= GroupP] ) },
+	    ok = update_main_group(RObj, NewMainGroup),
+	    {ok, Merged}
     end.
 
 
@@ -226,7 +187,7 @@ update_group(GroupP, RowKey, Value) ->
 
             end;
         {error, notfound} ->
-            ok = update_group(riak_object:new(Bucket, group_name(GroupP), #group{entries=[{RowKey, [Value]}]})),
+            ok = update_group(riak_object:new(Bucket, group_name(GroupP), #group{entries=[{RowKey, Value}]})),
             {ok, [], Value}
     end.
 
@@ -296,7 +257,7 @@ keyzip(N,Fun,[Tup1|Rest1]=L1,[Tup2|Rest2]=L2, Result) ->
 get_main_group() ->
     case Storage:get(Bucket, ColumnName) of
         {error, notfound} ->
-            Storage:put(riak_object:new(Bucket, ColumnName, #main_group{}),
+            Storage:put(riak_object:new(Bucket, ColumnName, #main_group{ grouppointers=[<<>>] }),
                         1, 0, 1000, [{returnbody, true}]),
             get_main_group();
         {error, E} ->
@@ -317,10 +278,9 @@ get_main_group() ->
             end
     end.
 
-merge_main_groups(#main_group{entries=Elms1, grouppointers=Groups1},
-                #main_group{entries=Elms2, grouppointers=Groups2}) ->
-    #main_group{ entries=merge_entries(Elms1, Elms2),
-                 grouppointers=merge_grouppointers(Groups1, Groups2) }.
+merge_main_groups(#main_group{grouppointers=Groups1},
+                #main_group{grouppointers=Groups2}) ->
+    #main_group{ grouppointers=merge_grouppointers(Groups1, Groups2) }.
 
 merge_grouppointers(Groups1,Groups2) ->
     R = lists:umerge(Groups1,Groups2),
