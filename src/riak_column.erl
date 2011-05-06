@@ -53,7 +53,13 @@
 group_name(GroupP) when bit_size(GroupP) =< 160 ->
     BitSize = bit_size(GroupP),
     Bits = BitSize rem 8,
-    <<ColumnName/binary,$#,BitSize,GroupP/bitstring,0:(8-Bits)/unsigned-unit:1>>.
+    case Bits of
+	0 -> 
+	    <<ColumnName/binary,$#,BitSize,GroupP/bitstring>>;
+	_ ->
+	    <<ColumnName/binary,$#,BitSize,GroupP/bitstring,0:(8-Bits)/unsigned-unit:1>>
+    end.
+	
 
 
 -spec lookup(RowKey::binary()) -> {ok, value()} | {error, notfound}.
